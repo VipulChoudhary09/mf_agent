@@ -25,7 +25,7 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 
 # ── Pipecat: frame types ─────────────────────────────────────
-from pipecat.frames.frames import LLMRunFrame, LLMUpdateSettingsFrame
+from pipecat.frames.frames import CancelFrame, LLMRunFrame, LLMUpdateSettingsFrame
 
 # ── Pipecat: pipeline + runner ───────────────────────────────
 from pipecat.pipeline.pipeline import Pipeline
@@ -135,6 +135,16 @@ tools = ToolsSchema(
                 },
             },
             required=["horizon_years", "risk_tolerance", "initial_investment"],
+        ),
+        FunctionSchema(
+            name="end_call",
+            description=(
+                "Call this tool when the conversation is complete — the user says "
+                "goodbye, thank you, or indicates they have no more questions. "
+                "Say a brief farewell BEFORE calling this tool."
+            ),
+            properties={},
+            required=[],
         ),
     ]
 )
@@ -283,6 +293,16 @@ async def run_bot(room_url: str, token: str):
         await params.result_callback(response_data)
 
     llm.register_function("extract_user_profile", handle_extract_user_profile)
+
+    async def handle_end_call(params: FunctionCallParams):
+        """Gracefully end the call when the user is done."""
+        logger.info("📞 end_call invoked — shutting down pipeline")
+        await params.result_callback({"status": "call_ended"})
+        # Give TTS a moment to flush the farewell audio
+        await asyncio.sleep(1.5)
+        await task.queue_frame(CancelFrame())
+
+    llm.register_function("end_call", handle_end_call)
 
     # ─────────────────────────────────────────
     # STEP 6: CONTEXT + AGGREGATORS
