@@ -91,6 +91,7 @@ STT_MODEL = "nova-3-general"
 STT_ENDPOINTING = 150
 TTS_MODEL = "sonic-2"
 TTS_VOICE = "79a125e8-cd45-4c13-8a67-188112f4dd22"  # British Lady
+USE_RAG = True  # Set to False to disable RAG and use full KB context injection
 
 VAD_PARAMS = VADParams(
     start_secs=0.2,
@@ -198,10 +199,15 @@ async def run_bot(room_url: str, token: str):
     logger.info("Knowledge base loaded ✓")
 
     # Initialize RAG context injector
-    rag_injector = RAGContextInjector(db_path="./chroma_db", n_results=4)
-    logger.info(
-        f"RAG context injector: {'enabled ✓' if rag_injector.enabled else 'disabled (no ChromaDB)'}"
-    )
+    if USE_RAG:
+        rag_injector = RAGContextInjector(db_path="./chroma_db", n_results=4)
+        logger.info(
+            f"RAG context injector: {'enabled ✓' if rag_injector.enabled else 'disabled (no ChromaDB)'}"
+        )
+    else:
+        rag_injector = RAGContextInjector.__new__(RAGContextInjector)
+        rag_injector.enabled = False
+        logger.info("RAG disabled (USE_RAG=False) — using full KB context")
 
     state = BotState()
 
