@@ -26,18 +26,19 @@ DEFAULT_LOG = "pipecat.log"
 
 # ── Pricing constants ─────────────────────────────────────────────────────────
 # Verify these at provider dashboards before using for billing decisions.
-# OpenAI gpt-4.1 (as of June 2026): https://openai.com/api/pricing
-#   Input:        $2.00 / 1M tokens
-#   Cached input: $0.50 / 1M tokens  (automatic prompt caching, 128-token chunks)
-#   Output:       $8.00 / 1M tokens
-# Cartesia: charges per second of audio generated (subscription-based credits)
-#   Pro $4/mo → 133 min  → ~$0.000501/sec
-#   Scale $239/mo → 10,667 min → ~$0.000373/sec
-#   Update this constant to match your plan.
-_OAI_GPT41_IN_USD_PER_TOK      = 2.00 / 1_000_000
-_OAI_GPT41_CACHED_USD_PER_TOK  = 0.50 / 1_000_000
-_OAI_GPT41_OUT_USD_PER_TOK     = 8.00 / 1_000_000
-_CARTESIA_USD_PER_AUDIO_SEC    = 0.000430   # mid-point estimate; adjust to your plan
+# Google Gemini 2.5 Flash (as of June 2026): https://ai.google.dev/pricing
+#   Input:        $0.30 / 1M tokens
+#   Cached input: $0.075 / 1M tokens  (context caching, 25% of input price)
+#   Output:       $2.50 / 1M tokens
+# Cartesia: charges per character (1 credit = 1 char incl. spaces/punctuation)
+#   ~$0.03/min of generated audio (≈900 chars/min at 150 wpm)
+#   Pro $4/mo → 100K credits, Startup $39/mo → 1.25M credits,
+#   Scale $239/mo → 8M credits.
+#   Per-char rate approximated from Scale tier: $239 / 8_000_000 = $0.00002988/char
+_GEMINI_FLASH_IN_USD_PER_TOK    = 0.30 / 1_000_000
+_GEMINI_FLASH_CACHED_USD_PER_TOK = 0.075 / 1_000_000
+_GEMINI_FLASH_OUT_USD_PER_TOK   = 2.50 / 1_000_000
+_CARTESIA_USD_PER_CHAR          = 0.00002988   # Scale tier; adjust to your plan
 # Deepgram nova-3 streaming (verify at https://deepgram.com/pricing). Billed per
 # second of audio streamed over the connection — i.e. roughly the whole call, not
 # per utterance — so STT is reported only as a session total from call duration.
@@ -252,21 +253,21 @@ class Turn:
         if not self.llm_prompt_tokens:
             return None
         uncached = max(0, self.llm_prompt_tokens - (self.llm_cache_read_tokens or 0))
-        return uncached * _OAI_GPT41_IN_USD_PER_TOK
+        return uncached * _GEMINI_FLASH_IN_USD_PER_TOK
 
     @property
     def llm_cache_cost_usd(self) -> Optional[float]:
         """Cached prompt tokens (discounted input rate)."""
         if not self.llm_cache_read_tokens:
             return None
-        return self.llm_cache_read_tokens * _OAI_GPT41_CACHED_USD_PER_TOK
+        return self.llm_cache_read_tokens * _GEMINI_FLASH_CACHED_USD_PER_TOK
 
     @property
     def llm_output_cost_usd(self) -> Optional[float]:
         """Completion tokens."""
         if not self.llm_completion_tokens:
             return None
-        return self.llm_completion_tokens * _OAI_GPT41_OUT_USD_PER_TOK
+        return self.llm_completion_tokens * _GEMINI_FLASH_OUT_USD_PER_TOK
 
     @property
     def llm_cost_usd(self) -> Optional[float]:
@@ -279,7 +280,7 @@ class Turn:
     @property
     def tts_cost_usd(self) -> Optional[float]:
         secs = self.bot_speech_secs
-        return (secs * _CARTESIA_USD_PER_AUDIO_SEC) if secs else None
+        return (self.tts_chars * _CARTESIA_USD_PER_CHAR) if self.tts_chars else None
 
     @property
     def total_cost_usd(self) -> Optional[float]:
@@ -984,7 +985,7 @@ def _tick_interval(total_secs: float, plot_w: int) -> int:
     return 120
 
 
-def display_timeline(conv: Conversation, label: str, width: int = None) -> None:
+def display_timeline(conv: Conversation, label: str, width: int = None, args_log_path: str = "pipecat.log") -> None:
     color = _use_color()
     if width is None:
         width = min(shutil.get_terminal_size().columns, 160)
@@ -1404,6 +1405,70 @@ def display_timeline(conv: Conversation, label: str, width: int = None) -> None:
                     print(f"             err:  {err_str}")
             if u or b or t.llm_error:
                 print()
+
+    # ── VAD Perceived Latency breakdown ───────────────────────────────────
+    vad_turns = [t for t in conv.turns if t.perceived is not None]
+    if vad_turns:
+        print(f"  {'─' * (width - 4)}")
+        print(f"  Perceived Latency (VAD Breakdown)")
+        print(f"  {'─' * (width - 4)}")
+        print(f"  {'#':>4}  {'VAD wait':>10}  {'User→Bot':>10}  {'Perceived':>10}  {'% VAD':>7}  User said")
+        print(f"  {'─'*4}  {'─'*10}  {'─'*10}  {'─'*10}  {'─'*7}  {'─'*30}")
+        for t in vad_turns:
+            vad_w = t.user_turn_secs or 0.0
+            ub    = t.user_bot_latency or 0.0
+            perc  = t.perceived or 0.0
+            pct   = int(vad_w / perc * 100) if perc > 0.01 else 0
+            u_short = _trunc(t.user_text or "…", 40)
+            lbl   = _turn_label(t.num)
+            if color:
+                print(f"  {lbl}  {vad_w:>10.3f}s  {ub:>10.3f}s  {perc:>10.3f}s  {pct:>6}%  {_DIM}{u_short}{_RESET}")
+            else:
+                print(f"  {lbl}  {vad_w:>10.3f}s  {ub:>10.3f}s  {perc:>10.3f}s  {pct:>6}%  {u_short}")
+        # Summary
+        avg_vad  = sum(t.user_turn_secs for t in vad_turns if t.user_turn_secs) / len(vad_turns)
+        avg_ub   = sum(t.user_bot_latency for t in vad_turns if t.user_bot_latency is not None) / len(vad_turns)
+        avg_perc = sum(t.perceived for t in vad_turns) / len(vad_turns)
+        avg_pct  = int(avg_vad / avg_perc * 100) if avg_perc > 0.01 else 0
+        print(f"  {'─'*4}  {'─'*10}  {'─'*10}  {'─'*10}  {'─'*7}")
+        print(f"  avg  {avg_vad:>10.3f}s  {avg_ub:>10.3f}s  {avg_perc:>10.3f}s  {avg_pct:>6}%")
+        print()
+
+    # ── Save transcript to transcripts.log ────────────────────────────────
+    if has_transcript:
+        import os as _os
+        transcript_path = _os.path.join(_os.path.dirname(args_log_path) or ".", "transcripts.log")
+        try:
+            with open(transcript_path, "a") as tf:
+                tf.write(f"\n{'=' * 60}\n")
+                tf.write(f"Room: {conv.room_id}\n")
+                if conv.start_time:
+                    tf.write(f"Started: {conv.start_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                tf.write(f"Turns: {len(conv.turns)}\n")
+                tf.write(f"{'=' * 60}\n\n")
+                for t in conv.turns:
+                    u_ts_str = ""
+                    if (t.user_transcript_time or t.user_stop_time) and conv.start_time:
+                        ref = t.user_transcript_time or t.user_stop_time
+                        secs = (ref - conv.start_time).total_seconds()
+                        u_ts_str = f"[{int(secs // 60):02d}:{int(secs % 60):02d}] "
+                    b_ts_str = ""
+                    if t.bot_start_time and conv.start_time:
+                        secs = (t.bot_start_time - conv.start_time).total_seconds()
+                        b_ts_str = f"[{int(secs // 60):02d}:{int(secs % 60):02d}] "
+                    if t.user_text:
+                        tf.write(f"  {u_ts_str}USER: {t.user_text}\n")
+                    if t.bot_text:
+                        tf.write(f"  {b_ts_str}BOT:  {t.bot_text}\n")
+                    if t.user_text or t.bot_text:
+                        tf.write("\n")
+            if color:
+                print(f"  {_DIM}Transcript saved → {transcript_path}{_RESET}")
+            else:
+                print(f"  Transcript saved → {transcript_path}")
+        except OSError as e:
+            print(f"  Warning: could not save transcript: {e}", file=sys.stderr)
+
     print()
 
 
@@ -1814,7 +1879,7 @@ def main() -> None:
     elif args.table:
         display(conv, label)
     else:
-        display_timeline(conv, label)
+        display_timeline(conv, label, args_log_path=args.log)
 
 
 if __name__ == "__main__":
