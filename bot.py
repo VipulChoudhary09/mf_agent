@@ -74,6 +74,7 @@ from prompts import (
 
 # ── RAG (Retrieval-Augmented Generation) ─────────────────────
 from rag.rag_processor import RAGContextInjector
+from rag.context_updater import RAGContextUpdater
 
 load_dotenv(override=True)
 
@@ -89,7 +90,7 @@ TTS_VOICE = "79a125e8-cd45-4c13-8a67-188112f4dd22"  # British Lady
 
 VAD_PARAMS = VADParams(
     start_secs=0.2,
-    stop_secs=0.3,
+    stop_secs=0.2,
     confidence=0.8,
     min_volume=0.3,
 )
@@ -148,7 +149,7 @@ tools = ToolsSchema(
                     ),
                 },
             },
-            required=["horizon_years", "risk_tolerance", "initial_investment"],
+            required=["horizon_years", "risk_tolerance", "initial_investment", "investment_mode"],
         ),
         FunctionSchema(
             name="end_call",
@@ -293,9 +294,12 @@ async def run_bot(room_url: str, token: str):
             state.profile_summary = result["profile_summary"]
             comparison_table = get_comparison_table()
 
+            # Feed comparison table to the per-turn RAG updater
+            rag_updater.set_comparison_table(comparison_table)
+
             # Try RAG-powered context first, fall back to full KB
             rag_context = rag_injector.retrieve_context(
-                query="fund overview key features exit load performance",
+                query="fund overview key features exit load performance investment details",
                 scheme_id=winner_id,
             )
 
@@ -395,13 +399,19 @@ async def run_bot(room_url: str, token: str):
     )
 
     # ─────────────────────────────────────────
-    # STEP 7: PIPELINE
+    # STEP 7: PIPELINE (with per-turn RAG updater)
     # ─────────────────────────────────────────
+    rag_updater = RAGContextUpdater(
+        state=state,
+        rag_injector=rag_injector,
+    )
+
     pipeline = Pipeline(
         [
             transport.input(),
             stt,
             user_aggregator,
+            rag_updater,       # ← per-turn RAG: enriches context before LLM
             llm,
             tts,
             transport.output(),

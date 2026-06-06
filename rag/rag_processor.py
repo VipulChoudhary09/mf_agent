@@ -71,7 +71,7 @@ class RAGContextInjector:
         try:
             start = time.monotonic()
             context = retrieve_formatted(
-                query=query,
+                question=query,
                 scheme_id=scheme_id,
                 n_results=self.n_results,
                 db_path=self.db_path,
