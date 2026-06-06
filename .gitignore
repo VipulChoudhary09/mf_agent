@@ -28,3 +28,4 @@ secrets/
 
 # Vector store (rebuilt from KB sources)
 chroma_db/
+transcripts.log
