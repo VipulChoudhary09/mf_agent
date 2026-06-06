@@ -1,0 +1,4 @@
+pipecat-ai[google,deepgram,cartesia,silero,daily]
+python-dotenv
+loguru
+pytest
