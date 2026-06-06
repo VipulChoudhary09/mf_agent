@@ -86,9 +86,8 @@ Returns a Daily room URL — open it in your browser to start the conversation.
 
 | Command | Use case |
 |---|---|
-| `python run_bot.py` | Direct launch — creates room, prints URL, runs one session |
-| `python text_bot.py` | Terminal-based text harness — same state machine, no voice services |
-| `python scripts/index_kb.py` | Manual KB re-indexing (server does this automatically) |
+| `python text_bot.py` | Terminal text harness — same state machine, no voice/RAG, only needs GOOGLE_API_KEY |
+| `python scripts/index_kb.py` | Force re-index KB into ChromaDB (server does this automatically) |
 
 ### Measure Latency
 
@@ -131,8 +130,7 @@ pytest tests/test_retriever.py -v  # 16 retrieval + 10 golden question tests
 mf_agent/
 ├── bot.py                  # Pipecat voice pipeline + state machine
 ├── server.py               # ← single entry point (auto-indexes, loads KB, serves API)
-├── run_bot.py              # Direct launcher — creates Daily room
-├── text_bot.py             # Terminal-based text harness
+├── text_bot.py             # Terminal text harness (no voice/RAG, testing only)
 ├── scoring.py              # Deterministic fund selection engine
 ├── knowledge_base.py       # Loads & caches scheme markdown files
 ├── prompts.py              # System prompts for each state (profiling/rec/tie-breaker)

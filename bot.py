@@ -1,9 +1,13 @@
 """
-Pipecat Voice Pipeline — PPFAS Mutual Fund Advisor Bot
+Pipecat Voice Pipeline — PPFAS Mutual Fund Advisor Bot.
 
-Pipeline: Daily WebRTC → Deepgram STT → Gemini LLM → Cartesia TTS → Daily WebRTC
+Pipeline:
+  Daily WebRTC → Deepgram STT → RAGContextUpdater → Gemini 2.5 Flash → Cartesia TTS → Daily WebRTC
 
-Run with: python run_bot.py (which creates a Daily room and launches this)
+State machine: PROFILING → (TIE_BREAKER?) → RECOMMENDATION (with per-turn RAG)
+Turn detection: SmartTurn v3 (local ML) + Silero VAD v5
+
+Launched by server.py via ``run_bot(room_url, token)``.
 Requires all 4 API keys in .env:
   GOOGLE_API_KEY, DEEPGRAM_API_KEY, CARTESIA_API_KEY, DAILY_API_KEY
 """

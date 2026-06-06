@@ -10,9 +10,12 @@ Scoring rules are based on:
 - Time horizon (exit load penalties, track record bonuses)
 - Risk tolerance (Dynamic's debt cushion vs equity-heavy options)
 - Growth style preference (downside protection / bluechip / global)
-- Hard constraints (minimum investment amounts)
+- Hard constraints (minimum lumpsum amounts — SIP exempt)
+- Investment mode awareness (SIP/lumpsum affects constraint evaluation)
 
 Near-tie detection (within 1 point) triggers a tie-breaker flow.
+
+Called by bot.py when the LLM invokes ``extract_user_profile()``.
 """
 
 

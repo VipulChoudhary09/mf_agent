@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Index all KB markdown files into ChromaDB.
 
+Normally you don't need to run this manually — server.py auto-indexes on
+startup if the vector store is missing or empty. Use this script only to
+force a full re-index (e.g. after updating KB documents).
+
 Usage:
     python scripts/index_kb.py                     # default paths
     python scripts/index_kb.py --kb-dir KB/pdftomds --db-path ./chroma_db

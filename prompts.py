@@ -2,12 +2,14 @@
 System Prompts for PPFAS Mutual Fund Voice Agent.
 
 Three conversation states, each with its own system prompt:
-  1. PROFILING — gather investment profile via 3-4 questions
+  1. PROFILING — gather investment profile via 4-5 questions
+     (horizon, risk, SIP/lumpsum, amount, growth style)
   2. TIE_BREAKER — disambiguate when two funds score within 1 point
-  3. RECOMMENDATION — announce the fund, then answer follow-up Q&A from KB
+  3. RECOMMENDATION — explain the fund, answer follow-up Q&A from KB
 
-The PROFILING prompt is a constant. The other two are template functions
-that inject fund-specific data at runtime.
+The PROFILING prompt is a constant. RECOMMENDATION has two template variants:
+  - ``_RECOMMENDATION_TEMPLATE`` — full KB context (fallback)
+  - ``_RECOMMENDATION_RAG_TEMPLATE`` — RAG-retrieved chunks (primary)
 """
 
 # ---------------------------------------------------------------------------

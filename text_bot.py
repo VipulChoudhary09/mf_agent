@@ -4,11 +4,12 @@ Text-mode testing harness for the Mutual Fund Voice Agent.
 Uses the google-genai SDK directly (NOT Pipecat) for simplicity.
 Implements the full 3-state machine: PROFILING → (TIE_BREAKER?) → RECOMMENDATION.
 
-Run with: python text_bot.py
-Requires only GOOGLE_API_KEY in .env.
+Note: This harness does NOT use RAG — it injects full KB context into the
+system prompt. Use it for testing the scoring engine and conversation flow,
+not for validating RAG retrieval accuracy.
 
-This lets you test the entire conversation flow without burning
-Deepgram/Cartesia free-tier minutes.
+Run with: python text_bot.py
+Requires only GOOGLE_API_KEY in .env (no Deepgram/Cartesia/Daily needed).
 """
 
 import os

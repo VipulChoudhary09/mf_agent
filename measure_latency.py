@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
-Parses pipecat.log and reports per-turn latency metrics for each conversation.
+Latency analyzer and cost calculator for the PPFAS Voice Agent.
 
-Default mode: river-flow timeline showing USER and BOT tracks on a shared time axis.
-Use --table for the original tabular format.
+Parses pipecat.log and reports per-turn metrics for each conversation:
+  - Perceived latency breakdown (VAD wait vs pipeline execution)
+  - River-flow timeline visualization (USER/BOT tracks on shared time axis)
+  - Token counts, streaming rates, and per-turn costs
+  - Session totals for Gemini 2.5 Flash, Cartesia TTS, and Deepgram STT
+  - Conversation transcript with timestamps
+  - Auto-saves transcripts to transcripts.log
 
 Usage:
   python3 measure_latency.py           # river flow (latest conversation)
-  python3 measure_latency.py --table   # original tabular format
+  python3 measure_latency.py --table   # tabular format
   python3 measure_latency.py -n 1      # one conversation back
   python3 measure_latency.py --list    # list all rooms in log
+  python3 measure_latency.py --html    # export to HTML
 """
 
 import ast

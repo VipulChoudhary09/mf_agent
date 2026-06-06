@@ -1,11 +1,14 @@
 """
 Knowledge Base Loader for PPFAS Mutual Fund Voice Agent.
 
-Loads the 6 extracted markdown files (flyers + presentations) for the 3 PPFAS
-schemes at startup. Provides per-scheme context for injection into the LLM
-system prompt, and a hardcoded comparison table for cross-fund questions.
+Loads the 6 markdown files (flyers + presentations) for the 3 PPFAS schemes
+at startup and caches them in memory. Provides:
+  - Per-scheme full-text context (used as fallback when RAG retrieval fails)
+  - A hardcoded comparison table for cross-fund questions
 
-Total KB size: ~104KB — fits easily in Gemini's context window. No vector DB needed.
+The primary retrieval path is RAG via ChromaDB (see rag/ module).
+This module serves as the full-context fallback and the source for
+the comparison table injected into recommendation prompts.
 """
 
 import os
