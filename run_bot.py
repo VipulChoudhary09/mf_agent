@@ -10,6 +10,7 @@ Usage: python run_bot.py
 import asyncio
 import os
 import sys
+import time
 
 import httpx
 from dotenv import load_dotenv
@@ -42,7 +43,7 @@ async def create_daily_room() -> tuple[str, str]:
             headers=headers,
             json={
                 "properties": {
-                    "exp": int(asyncio.get_event_loop().time()) + 3600,
+                    "exp": int(time.time()) + 3600,
                     "enable_chat": False,
                     "enable_screenshare": False,
                     "max_participants": 2,
