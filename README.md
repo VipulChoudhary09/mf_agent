@@ -1,38 +1,43 @@
 # PPFAS Mutual Fund Voice Agent
 
-A deterministic, Pipecat-based voice AI agent that profiles users through natural conversation and recommends the most suitable PPFAS mutual fund scheme.
+A production-grade voice AI agent that profiles investors through natural conversation and recommends the most suitable PPFAS mutual fund scheme, powered by RAG-based knowledge retrieval for accurate follow-up Q&A.
 
 ## Architecture
 
 ```
-User ↔ Daily WebRTC ↔ Deepgram STT → Gemini 2.5 Flash → Cartesia TTS → Daily WebRTC
-                                           ↓ (function call)
-                                    Scoring Engine (Python)
-                                           ↓
-                                    Knowledge Base (6 MD files)
+                                ┌─────────────────────────────┐
+User ↔ Daily WebRTC ↔ Deepgram STT → RAGContextUpdater → Gemini 2.5 Flash → Cartesia TTS → Daily WebRTC
+                                │         ↓                        ↓ (function call)        │
+                                │   ChromaDB (per-turn)    Scoring Engine (Python)           │
+                                │   gemini-embedding-001   ├── deterministic scoring         │
+                                │   66 chunks, 3 schemes   └── tie-breaker detection         │
+                                │                                                            │
+                                │   SmartTurn v3 (local)   ← turn-end detection              │
+                                │   Silero VAD v5          ← voice activity detection         │
+                                └─────────────────────────────────────────────────────────────┘
 ```
 
-**Hybrid approach**: The LLM handles natural language parsing and explanation, while a deterministic Python scoring engine selects the fund — ensuring consistency, auditability, and compliance.
+**Hybrid approach**: The LLM handles natural language understanding and explanation, while a deterministic Python scoring engine selects the fund — ensuring consistency, auditability, and compliance. RAG retrieves relevant KB chunks per question for accurate follow-up answers.
 
 ## Supported Funds
 
-| Fund | Key Characteristic |
-|---|---|
-| **Flexi Cap** | Global diversification (India + international stocks) |
-| **Dynamic Asset Allocation** | Active debt/equity rebalancing for downside protection |
-| **Large Cap** | Low-cost passive exposure to India's top 100 companies |
+| Fund | Key Characteristic | Risk Level |
+|---|---|---|
+| **Parag Parikh Flexi Cap Fund** | Global diversification (India + international stocks like Google) | Very High |
+| **Parag Parikh Dynamic Asset Allocation Fund** | Active debt/equity rebalancing for downside protection | Moderately High |
+| **Parag Parikh Large Cap Fund** | Low-cost passive exposure to India's top 100 companies | Very High |
 
-## State Machine
+## Conversation State Machine
 
 ```
-PROFILING → extract_user_profile() → RECOMMENDATION
+PROFILING → extract_user_profile() → RECOMMENDATION ← (follow-up Q&A with per-turn RAG)
                   ↓ (if tie)
             TIE_BREAKER → extract_user_profile() → RECOMMENDATION
 ```
 
-1. **PROFILING**: Bot asks about investment horizon, risk tolerance, amount, and growth preferences
+1. **PROFILING**: Bot asks about investment horizon, risk tolerance, SIP/lumpsum preference, amount, and growth style
 2. **TIE_BREAKER**: If two funds score within 1 point, bot asks one clarifying question
-3. **RECOMMENDATION**: Bot explains the selected fund using scheme-specific knowledge
+3. **RECOMMENDATION**: Bot explains the selected fund; each follow-up question triggers dynamic RAG retrieval for accurate answers
 
 ## Quick Start
 
@@ -44,35 +49,52 @@ PROFILING → extract_user_profile() → RECOMMENDATION
 ### Setup
 
 ```bash
-# Clone and enter the project
 cd mf_agent
 
-# Create virtual environment
 python -m venv venv
 source venv/bin/activate
 
-# Install dependencies
 pip install -r requirements.txt
 
 # Configure API keys
 cp .env.example .env
-# Edit .env with your keys
+# Edit .env with your 4 API keys:
+#   GOOGLE_API_KEY, DEEPGRAM_API_KEY, CARTESIA_API_KEY, DAILY_API_KEY
 ```
+
+### Index the Knowledge Base (first time only)
+
+```bash
+python scripts/index_kb.py
+```
+
+This creates a persistent ChromaDB vector store (`chroma_db/`) with 66 embedded chunks from 6 KB documents using `gemini-embedding-001`.
 
 ### Run
 
+#### Option A: FastAPI Server (recommended)
+
 ```bash
-# Launch the voice agent
+python server.py
+```
+
+Then in another terminal:
+
+```bash
+curl -s -X POST http://localhost:7860/start | jq .
+```
+
+Returns a Daily room URL — open it in your browser to start the conversation.
+
+#### Option B: Direct Launch
+
+```bash
 python run_bot.py
 ```
 
-This will:
-1. Validate all 4 API keys
-2. Create a temporary Daily.co room
-3. Print a join URL — open it in your browser
-4. Start the voice pipeline
+Creates a temporary Daily room, prints the join URL, and starts the pipeline.
 
-### Text Mode (for testing)
+#### Option C: Text Mode (testing)
 
 ```bash
 python text_bot.py
@@ -80,53 +102,123 @@ python text_bot.py
 
 Terminal-based harness with the same state machine — useful for testing without voice services.
 
+### Measure Latency
+
+```bash
+python measure_latency.py
+```
+
+Parses `pipecat.log` and displays:
+- Per-turn latency breakdown (perceived, VAD, user→bot, LLM TTFB, TTS TTFB)
+- River-flow timeline visualization
+- Token counts, streaming rates, and cost breakdown (Gemini 2.5 Flash + Cartesia + Deepgram pricing)
+- Perceived Latency (VAD breakdown) — shows what % of wait is VAD vs pipeline
+- Conversation transcript with timestamps
+- Auto-saves transcripts to `transcripts.log`
+
+```bash
+# Options
+python measure_latency.py -n 1     # previous conversation
+python measure_latency.py --list   # list all conversations in log
+python measure_latency.py --table  # tabular format
+python measure_latency.py --html   # export to HTML
+```
+
 ### Tests
 
 ```bash
-# Unit tests (scoring engine)
-pytest tests/test_scoring.py -v
+# All tests (57)
+pytest tests/ -v
 
-# E2E tests (requires GOOGLE_API_KEY)
-pytest tests/test_e2e.py -v
+# By module
+pytest tests/test_scoring.py -v    # 16 scoring engine tests
+pytest tests/test_e2e.py -v        # 4 automated e2e scenarios
+pytest tests/test_chunker.py -v    # 25 markdown chunker tests
+pytest tests/test_retriever.py -v  # 16 retrieval + 10 golden question tests
 ```
 
 ## Project Structure
 
 ```
 mf_agent/
-├── bot.py              # Pipecat voice pipeline (Stage 3)
-├── run_bot.py           # Launcher — creates Daily room
-├── text_bot.py          # Terminal-based text harness (Stage 2)
-├── scoring.py           # Deterministic fund selection engine
-├── knowledge_base.py    # Loads & caches scheme markdown files
-├── prompts.py           # System prompts for each state
-├── requirements.txt     # Python dependencies
-├── .env                 # API keys (not committed)
-├── KB/                  # Knowledge base markdown files
-│   ├── Flexi_Cap.md
-│   ├── Dynamic_Asset_Allocation.md
-│   ├── Large_Cap.md
-│   ├── comparison.md
-│   ├── general_faq.md
-│   └── why_ppfas.md
-└── tests/
-    ├── test_scoring.py  # 16 unit tests
-    └── test_e2e.py      # 4 automated e2e scenarios
+├── bot.py                  # Pipecat voice pipeline + state machine
+├── server.py               # FastAPI server with /start and /health endpoints
+├── run_bot.py              # Direct launcher — creates Daily room
+├── text_bot.py             # Terminal-based text harness
+├── scoring.py              # Deterministic fund selection engine
+├── knowledge_base.py       # Loads & caches scheme markdown files
+├── prompts.py              # System prompts for each state (profiling/rec/tie-breaker)
+├── measure_latency.py      # Latency analyzer and cost calculator
+├── requirements.txt        # Python dependencies
+├── .env                    # API keys (not committed)
+│
+├── rag/                    # RAG pipeline
+│   ├── chunker.py          # Section-aware markdown splitter (H2/H3, table integrity)
+│   ├── embedder.py         # ChromaDB + gemini-embedding-001 (768d cosine)
+│   ├── retriever.py        # Filtered retrieval with 0.6 confidence threshold
+│   ├── rag_processor.py    # Stateless RAG helper for initial recommendation
+│   └── context_updater.py  # Per-turn FrameProcessor for follow-up Q&A
+│
+├── scripts/
+│   └── index_kb.py         # Batch embed KB → ChromaDB (rate-limit aware)
+│
+├── KB/                     # Knowledge base source documents
+│   └── pdftomds/           # 6 markdown files (flyer + presentation per fund)
+│       ├── FCfly.md / FCpres.md    # Flexi Cap
+│       ├── Dfly.md / Dpres.md      # Dynamic Asset Allocation
+│       └── LCfly.md / LCpres.md    # Large Cap
+│
+├── tests/                  # 57 tests total
+│   ├── test_scoring.py     # Scoring engine unit tests
+│   ├── test_e2e.py         # Automated e2e conversation scenarios
+│   ├── test_chunker.py     # Markdown chunker tests
+│   └── test_retriever.py   # RAG retrieval + golden question tests
+│
+└── docs/
+    └── rag_strategy.md     # RAG architecture planning doc
 ```
+
+## RAG Pipeline
+
+The agent uses a two-stage RAG approach:
+
+1. **Initial Retrieval** (at recommendation time): A broad query fetches general fund context for the system prompt
+2. **Per-Turn Retrieval** (each follow-up question): `RAGContextUpdater` intercepts `LLMContextFrame` in the pipeline, extracts the user's question, and queries ChromaDB with that specific question + scheme_id filter
+
+This means each follow-up gets tailored context:
+- *"Who manages this fund?"* → retrieves fund manager chunk
+- *"What are the top holdings?"* → retrieves TOP 10 STOCKS chunk
+- *"3-year performance?"* → retrieves LUMPSUM & SIP PERFORMANCE chunk
+
+**Storage**: ChromaDB persistent local store (`chroma_db/`), 66 chunks across 3 schemes, embedded with `gemini-embedding-001` (768-dim cosine similarity).
 
 ## Key Design Decisions
 
-- **In-context knowledge injection** (~104KB) instead of RAG — simpler, deterministic, no retrieval latency
-- **System prompt swapping** via `LLMUpdateSettingsFrame` for state transitions (Gemini doesn't support mutable system messages in chat)
-- **Hard constraints**: Dynamic Asset Allocation requires ₹5,000 minimum investment; exit load penalties for Flexi Cap
-- **Near-tie detection**: When top-2 scores are within 1 point, triggers tie-breaker flow instead of potentially wrong recommendation
+- **Per-turn RAG** over full-context injection: Reduces system prompt from ~47K chars to ~2-4K chars per turn while maintaining accuracy across diverse follow-up questions
+- **Deterministic scoring engine**: The LLM never picks the fund — a Python function with auditable rules does, ensuring compliance and reproducibility
+- **System prompt swapping** via `LLMUpdateSettingsFrame` for state transitions (Gemini doesn't support mutable system messages in chat history)
+- **SmartTurn v3** for turn-end detection: Uses a local ML model instead of fixed silence timers, reducing false turn-ends mid-sentence
+- **Hard constraints**: Dynamic Asset Allocation requires ₹5,000 minimum for lumpsum (SIP exempt); exit load penalties for Flexi Cap under 2 years
+- **Near-tie detection**: When top-2 scores are within 1 point, triggers tie-breaker flow instead of a potentially wrong recommendation
 
-## Services
+## Services & Pricing
 
-| Service | Purpose | Model |
-|---|---|---|
-| Deepgram | Speech-to-Text | nova-3-general |
-| Google Gemini | LLM (conversation + function calling) | gemini-2.5-flash |
-| Cartesia | Text-to-Speech | sonic-2 |
-| Daily | WebRTC transport | — |
-| Silero | Voice Activity Detection (local) | v5 |
+| Service | Purpose | Model | Cost |
+|---|---|---|---|
+| Google Gemini | LLM (conversation + function calling) | gemini-2.5-flash | $0.30/$2.50 per M input/output tokens |
+| Deepgram | Speech-to-Text (streaming) | nova-3-general | $0.0077/min |
+| Cartesia | Text-to-Speech | sonic-2 | ~$0.03/min (~1 credit/char) |
+| Daily | WebRTC transport | — | Free tier available |
+| Silero | Voice Activity Detection (local) | v5 | Free (local inference) |
+| ChromaDB | Vector store (local) | — | Free (local) |
+
+**Typical session cost**: ~$0.04–0.10 per 3-5 minute conversation.
+
+## Environment Variables
+
+```bash
+GOOGLE_API_KEY=       # Google AI Studio API key (Gemini + embeddings)
+DEEPGRAM_API_KEY=     # Deepgram STT API key
+CARTESIA_API_KEY=     # Cartesia TTS API key
+DAILY_API_KEY=        # Daily.co API key (WebRTC rooms)
+```
