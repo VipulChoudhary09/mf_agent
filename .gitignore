@@ -17,6 +17,11 @@ build/
 *.swp
 *.swo
 
+# Logs
+pipecat.log
+pipecat.log.*
+
 # OS
 .DS_Store
 Thumbs.db
+demo_pipeline/

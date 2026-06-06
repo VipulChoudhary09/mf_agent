@@ -33,6 +33,10 @@ from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 
 # ── Pipecat: observers ────────────────────────────────────────
+from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
+from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
+from pipecat.observers.loggers.llm_log_observer import LLMLogObserver
+from pipecat.observers.loggers.transcription_log_observer import TranscriptionLogObserver
 from pipecat.observers.loggers.metrics_log_observer import MetricsLogObserver
 
 # ── Pipecat: context management ─────────────────────────────
@@ -47,6 +51,12 @@ from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.services.llm_service import FunctionCallParams
+
+# ── Pipecat: turn strategies ─────────────────────────────────
+from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
+from pipecat.turns.user_start import VADUserTurnStartStrategy, TranscriptionUserTurnStartStrategy
+from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 
 # ── Pipecat: Daily transport ─────────────────────────────────
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
@@ -313,7 +323,33 @@ async def run_bot(room_url: str, token: str):
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(params=VAD_PARAMS),
+            user_turn_strategies=UserTurnStrategies(
+                start=[
+                    VADUserTurnStartStrategy(),
+                    TranscriptionUserTurnStartStrategy(),
+                ],
+                stop=[
+                    TurnAnalyzerUserTurnStopStrategy(
+                        turn_analyzer=LocalSmartTurnAnalyzerV3()
+                    ),
+                ],
+            ),
         ),
+    )
+
+    # Log session metadata for measure_latency.py
+    logger.info(
+        f"[SESSION] vad"
+        f" start_secs={VAD_PARAMS.start_secs}"
+        f" stop_secs={VAD_PARAMS.stop_secs}"
+        f" confidence={VAD_PARAMS.confidence}"
+        f" min_volume={VAD_PARAMS.min_volume}"
+    )
+    logger.info(
+        f"[SESSION] llm provider=google model={LLM_MODEL}"
+    )
+    logger.info(
+        f"[SESSION] tts provider=cartesia model={TTS_MODEL} voice={TTS_VOICE}"
     )
 
     # ─────────────────────────────────────────
@@ -332,11 +368,44 @@ async def run_bot(room_url: str, token: str):
     )
 
     # ─────────────────────────────────────────
-    # STEP 8: PIPELINE TASK
+    # STEP 8: PIPELINE TASK + OBSERVERS
     # ─────────────────────────────────────────
+    latency_observer = UserBotLatencyObserver()
+    turn_tracker = TurnTrackingObserver()
+
+    @turn_tracker.event_handler("on_turn_started")
+    async def on_turn_started(tracker, turn_number):
+        logger.info(f"[TURN] Turn {turn_number} started")
+
+    @turn_tracker.event_handler("on_turn_ended")
+    async def on_turn_ended(tracker, turn_number, duration, was_interrupted):
+        status = "interrupted" if was_interrupted else "completed"
+        logger.info(f"[TURN] Turn {turn_number} {status} after {duration:.3f}s")
+
+    @latency_observer.event_handler("on_latency_breakdown")
+    async def on_latency_breakdown(obs, breakdown):
+        parts = [
+            f"user_turn_secs={breakdown.user_turn_secs:.3f}"
+            if breakdown.user_turn_secs is not None
+            else "user_turn_secs=n/a"
+        ]
+        for t in breakdown.ttfb:
+            parts.append(f"ttfb_{t.processor}={t.duration_secs:.3f}")
+        if breakdown.text_aggregation:
+            parts.append(
+                f"text_agg={breakdown.text_aggregation.duration_secs:.3f}"
+            )
+        logger.info(f"[LATENCY_BREAKDOWN] {' '.join(parts)}")
+
     task = PipelineTask(
         pipeline,
-        observers=[MetricsLogObserver()],
+        observers=[
+            latency_observer,
+            turn_tracker,
+            LLMLogObserver(),
+            TranscriptionLogObserver(),
+            MetricsLogObserver(),
+        ],
         params=PipelineParams(
             enable_metrics=True,
             enable_usage_metrics=True,

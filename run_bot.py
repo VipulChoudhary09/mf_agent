@@ -25,6 +25,14 @@ logger.add(
     format="<dim>{time:HH:mm:ss}</dim> | <level>{level:<7}</level> | {message}",
     level="DEBUG",
 )
+# File sink for measure_latency.py — format matches parse_ts() expectations
+logger.add(
+    "pipecat.log",
+    format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<7} | {message}",
+    level="DEBUG",
+    rotation="10 MB",
+    retention=3,
+)
 
 
 async def create_daily_room() -> tuple[str, str]:
