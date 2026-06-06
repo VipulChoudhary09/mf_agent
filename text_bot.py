@@ -14,6 +14,7 @@ Deepgram/Cartesia free-tier minutes.
 import os
 import sys
 import json
+import time
 from enum import Enum
 
 from dotenv import load_dotenv
@@ -36,7 +37,9 @@ from prompts import (
 
 load_dotenv()
 
-MODEL = "gemini-2.0-flash"
+MODEL = "gemini-2.5-flash"
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds
 
 # Configure loguru — clean format for terminal
 logger.remove()
@@ -149,11 +152,15 @@ class TextBot:
         The google-genai SDK binds system_instruction at chat creation time,
         so we recreate the chat while preserving conversation history.
         """
+        # In RECOMMENDATION state, remove tools so model doesn't try to
+        # call extract_user_profile again
+        tools = [TOOLS] if self.state != State.RECOMMENDATION else []
+
         self.chat = self.client.chats.create(
             model=MODEL,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
-                tools=[TOOLS],
+                tools=tools,
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(
                     disable=True
                 ),
@@ -162,6 +169,28 @@ class TextBot:
             history=self.history,
         )
         logger.debug(f"Chat created with state={self.state.value}")
+
+    def _send_with_retry(self, message: str) -> object:
+        """Send a message to the chat with retry logic for transient errors."""
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                return self.chat.send_message(message)
+            except Exception as e:
+                error_msg = str(e)
+                if attempt < MAX_RETRIES and (
+                    "RemoteProtocolError" in error_msg
+                    or "disconnected" in error_msg.lower()
+                    or "503" in error_msg
+                    or "429" in error_msg
+                ):
+                    wait = RETRY_DELAY * attempt
+                    logger.warning(
+                        f"Transient error (attempt {attempt}/{MAX_RETRIES}): "
+                        f"{error_msg[:80]}... retrying in {wait}s"
+                    )
+                    time.sleep(wait)
+                else:
+                    raise
 
     def _handle_function_call(
         self, fn_call: types.FunctionCall
@@ -255,15 +284,14 @@ class TextBot:
     def get_greeting(self) -> str:
         """Get the initial greeting from the bot (bot speaks first)."""
         logger.info("🎙️ Bot generating greeting...")
-        response = self.chat.send_message("Begin the conversation.")
+        response = self._send_with_retry("Begin the conversation.")
 
         # Check for function call (shouldn't happen on greeting, but be safe)
         if response.candidates and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
                 if part.function_call:
                     self._handle_function_call(part.function_call)
-                    # Get the model's response after function result
-                    follow_up = self.chat.send_message("Continue the conversation.")
+                    follow_up = self._send_with_retry("Continue the conversation.")
                     return follow_up.text or ""
 
         return response.text or ""
@@ -275,7 +303,7 @@ class TextBot:
         call extract_user_profile, we run the scoring engine, swap
         prompts, and return the model's recommendation.
         """
-        response = self.chat.send_message(user_input)
+        response = self._send_with_retry(user_input)
 
         # Check if the model wants to call a function
         if response.candidates and response.candidates[0].content.parts:
@@ -286,7 +314,7 @@ class TextBot:
 
                     # Now get the model's natural language response
                     # (recommendation announcement or tie-breaker question)
-                    follow_up = self.chat.send_message(
+                    follow_up = self._send_with_retry(
                         "Now respond to the user based on the function result."
                     )
                     return follow_up.text or ""
