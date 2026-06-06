@@ -62,21 +62,17 @@ cp .env.example .env
 #   GOOGLE_API_KEY, DEEPGRAM_API_KEY, CARTESIA_API_KEY, DAILY_API_KEY
 ```
 
-### Index the Knowledge Base (first time only)
-
-```bash
-python scripts/index_kb.py
-```
-
-This creates a persistent ChromaDB vector store (`chroma_db/`) with 66 embedded chunks from 6 KB documents using `gemini-embedding-001`.
-
 ### Run
-
-#### Option A: FastAPI Server (recommended)
 
 ```bash
 python server.py
 ```
+
+On startup, the server will:
+1. Validate all 4 API keys
+2. Auto-index the KB into ChromaDB if needed (first run or empty store)
+3. Pre-load the knowledge base into memory
+4. Start the FastAPI server on port 7860
 
 Then in another terminal:
 
@@ -86,21 +82,13 @@ curl -s -X POST http://localhost:7860/start | jq .
 
 Returns a Daily room URL — open it in your browser to start the conversation.
 
-#### Option B: Direct Launch
+#### Alternative modes
 
-```bash
-python run_bot.py
-```
-
-Creates a temporary Daily room, prints the join URL, and starts the pipeline.
-
-#### Option C: Text Mode (testing)
-
-```bash
-python text_bot.py
-```
-
-Terminal-based harness with the same state machine — useful for testing without voice services.
+| Command | Use case |
+|---|---|
+| `python run_bot.py` | Direct launch — creates room, prints URL, runs one session |
+| `python text_bot.py` | Terminal-based text harness — same state machine, no voice services |
+| `python scripts/index_kb.py` | Manual KB re-indexing (server does this automatically) |
 
 ### Measure Latency
 
@@ -142,7 +130,7 @@ pytest tests/test_retriever.py -v  # 16 retrieval + 10 golden question tests
 ```
 mf_agent/
 ├── bot.py                  # Pipecat voice pipeline + state machine
-├── server.py               # FastAPI server with /start and /health endpoints
+├── server.py               # ← single entry point (auto-indexes, loads KB, serves API)
 ├── run_bot.py              # Direct launcher — creates Daily room
 ├── text_bot.py             # Terminal-based text harness
 ├── scoring.py              # Deterministic fund selection engine
