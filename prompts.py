@@ -95,6 +95,34 @@ CRITICAL RULES:
 === END COMPARISON TABLE ===\
 """
 
+# RAG variant: uses retrieved chunks instead of full KB
+_RECOMMENDATION_RAG_TEMPLATE = """\
+The system has analyzed the user's profile and matched them with the {fund_name}.
+
+MANDATORY FIRST ACTION — read this disclaimer verbatim:
+"Mutual Fund investments are subject to market risks. Please read all scheme related documents carefully."
+
+Then enthusiastically tell them which fund they matched with and explain WHY based on their profile: {profile_summary}.
+
+After the explanation, ask if they have any specific questions about the fund.
+
+CRITICAL RULES:
+- ONLY use facts from the RELEVANT CONTEXT below. NEVER invent or estimate numbers.
+- If asked something not covered in the context, say: "I don't have that specific detail in my information. I'd recommend checking the official factsheet at amc.ppfas.com or consulting a financial advisor."
+- When citing performance data, ALWAYS mention the time period it refers to.
+- The {fund_name} was launched on {inception_date}. If asked about performance and it has less than 3 years of history, explicitly acknowledge this.
+- Keep responses concise — this is a voice conversation, not a written report. 3-4 sentences max unless the user asks for detail.
+- The context below is dynamically retrieved and may be updated with each question.
+
+=== RELEVANT CONTEXT: {fund_name} ===
+{rag_context}
+=== END RELEVANT CONTEXT ===
+
+=== FUND COMPARISON TABLE (use only if user asks to compare funds) ===
+{comparison_table}
+=== END COMPARISON TABLE ===\
+"""
+
 
 def build_recommendation_prompt(
     fund_id: str,
@@ -120,6 +148,38 @@ def build_recommendation_prompt(
         fund_name=fund_name,
         profile_summary=profile_summary,
         scheme_context=scheme_context,
+        comparison_table=comparison_table,
+        inception_date=inception_date,
+    )
+
+
+def build_recommendation_prompt_rag(
+    fund_id: str,
+    profile_summary: str,
+    rag_context: str,
+    comparison_table: str,
+) -> str:
+    """Build the RECOMMENDATION system prompt with RAG-retrieved context.
+
+    Uses only the retrieved chunks instead of the full KB. This reduces
+    the system prompt from ~47K chars to ~2-4K chars.
+
+    Args:
+        fund_id: Scheme ID (e.g. 'Flexi_Cap')
+        profile_summary: Natural language profile from scoring engine
+        rag_context: Formatted RAG-retrieved chunks (from RAGContextInjector)
+        comparison_table: Cross-fund comparison table string
+
+    Returns:
+        Fully populated system prompt string.
+    """
+    fund_name = FUND_NAMES[fund_id]
+    inception_date = FUND_INCEPTION_DATES[fund_id]
+
+    return _RECOMMENDATION_RAG_TEMPLATE.format(
+        fund_name=fund_name,
+        profile_summary=profile_summary,
+        rag_context=rag_context,
         comparison_table=comparison_table,
         inception_date=inception_date,
     )
