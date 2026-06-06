@@ -82,8 +82,12 @@ def recommend_mutual_fund(profile: dict) -> dict:
         scores["Flexi_Cap"] += 4
     # "unspecified" adds no score — relies on horizon + risk
 
+    investment_mode = profile.get("investment_mode", "unspecified")
+
     # --- Rule 4: HARD CONSTRAINTS ---
-    if 0 < investment < 5000:
+    # Dynamic Asset Allocation requires ₹5,000 min for lumpsum only.
+    # SIP investors with smaller amounts should not be penalized.
+    if 0 < investment < 5000 and investment_mode not in ("sip", "both"):
         scores["Dynamic_Asset_Allocation"] = -999  # Requires ₹5,000 min lumpsum
 
     # --- Determine Winner ---

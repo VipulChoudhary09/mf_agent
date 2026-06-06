@@ -24,4 +24,8 @@ pipecat.log.*
 # OS
 .DS_Store
 Thumbs.db
-demo_pipeline/
+secrets/
+
+# Vector store (rebuilt from KB sources)
+chroma_db/
+transcripts.log

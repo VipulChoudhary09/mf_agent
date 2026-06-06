@@ -2,3 +2,8 @@ pipecat-ai[google,deepgram,cartesia,silero,daily]
 python-dotenv
 loguru
 pytest
+fastapi
+uvicorn
+chromadb
+google-genai
+httpx

@@ -68,8 +68,13 @@ from prompts import (
     PROFILING_PROMPT,
     FUND_NAMES,
     build_recommendation_prompt,
+    build_recommendation_prompt_rag,
     build_tie_breaker_prompt,
 )
+
+# ── RAG (Retrieval-Augmented Generation) ─────────────────────
+from rag.rag_processor import RAGContextInjector
+from rag.context_updater import RAGContextUpdater
 
 load_dotenv(override=True)
 
@@ -85,7 +90,7 @@ TTS_VOICE = "79a125e8-cd45-4c13-8a67-188112f4dd22"  # British Lady
 
 VAD_PARAMS = VADParams(
     start_secs=0.2,
-    stop_secs=0.3,
+    stop_secs=0.2,
     confidence=0.8,
     min_volume=0.3,
 )
@@ -144,7 +149,7 @@ tools = ToolsSchema(
                     ),
                 },
             },
-            required=["horizon_years", "risk_tolerance", "initial_investment"],
+            required=["horizon_years", "risk_tolerance", "initial_investment", "investment_mode"],
         ),
         FunctionSchema(
             name="end_call",
@@ -169,6 +174,9 @@ class BotState:
 
     def __init__(self):
         self.current = "profiling"  # profiling → tie_breaker → recommendation
+        self.recommended_fund: str | None = None  # scheme_id once recommendation is made
+        self.profile_summary: str | None = None  # cached for RAG prompt rebuilds
+        self.using_rag: bool = False  # True if RAG is active for this session
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +192,12 @@ async def run_bot(room_url: str, token: str):
     logger.info("Loading knowledge base...")
     load_all()
     logger.info("Knowledge base loaded ✓")
+
+    # Initialize RAG context injector
+    rag_injector = RAGContextInjector(db_path="./chroma_db", n_results=4)
+    logger.info(
+        f"RAG context injector: {'enabled ✓' if rag_injector.enabled else 'disabled (no ChromaDB)'}"
+    )
 
     state = BotState()
 
@@ -276,21 +290,53 @@ async def run_bot(room_url: str, token: str):
             # --- Transition to RECOMMENDATION ---
             winner_id = result["winner"]
             state.current = "recommendation"
-            scheme_context = get_scheme_context(winner_id)
+            state.recommended_fund = winner_id
+            state.profile_summary = result["profile_summary"]
             comparison_table = get_comparison_table()
-            new_prompt = build_recommendation_prompt(
-                winner_id,
-                result["profile_summary"],
-                scheme_context,
-                comparison_table,
+
+            # Feed comparison table to the per-turn RAG updater
+            rag_updater.set_comparison_table(comparison_table)
+
+            # Try RAG-powered context first, fall back to full KB
+            rag_context = rag_injector.retrieve_context(
+                query="fund overview key features exit load performance investment details",
+                scheme_id=winner_id,
             )
+
+            if rag_context:
+                state.using_rag = True
+                new_prompt = build_recommendation_prompt_rag(
+                    winner_id,
+                    result["profile_summary"],
+                    rag_context,
+                    comparison_table,
+                )
+                logger.info(
+                    f"✅ State → RECOMMENDATION ({winner_id}) "
+                    f"[RAG: {len(rag_context)} chars]"
+                )
+            else:
+                # Fallback: inject full KB context
+                state.using_rag = False
+                scheme_context = get_scheme_context(winner_id)
+                new_prompt = build_recommendation_prompt(
+                    winner_id,
+                    result["profile_summary"],
+                    scheme_context,
+                    comparison_table,
+                )
+                logger.info(
+                    f"✅ State → RECOMMENDATION ({winner_id}) "
+                    f"[FULL KB fallback: {len(scheme_context)} chars]"
+                )
+
             response_data = {
                 "status": "recommendation_ready",
                 "recommended_fund": FUND_NAMES[winner_id],
                 "profile_summary": result["profile_summary"],
                 "scores": result["scores"],
+                "context_mode": "rag" if state.using_rag else "full_kb",
             }
-            logger.info(f"✅ State → RECOMMENDATION ({winner_id})")
 
         # Update system prompt dynamically
         await task.queue_frame(
@@ -353,13 +399,19 @@ async def run_bot(room_url: str, token: str):
     )
 
     # ─────────────────────────────────────────
-    # STEP 7: PIPELINE
+    # STEP 7: PIPELINE (with per-turn RAG updater)
     # ─────────────────────────────────────────
+    rag_updater = RAGContextUpdater(
+        state=state,
+        rag_injector=rag_injector,
+    )
+
     pipeline = Pipeline(
         [
             transport.input(),
             stt,
             user_aggregator,
+            rag_updater,       # ← per-turn RAG: enriches context before LLM
             llm,
             tts,
             transport.output(),
