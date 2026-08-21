@@ -1,64 +1,45 @@
-"""
-Text-mode testing harness for the Mutual Fund Voice Agent.
+"""Text-mode testing harness for the mutual-fund advisor.
 
-Uses the google-genai SDK directly (NOT Pipecat) for simplicity.
-Implements the full 3-state machine: PROFILING → (TIE_BREAKER?) → RECOMMENDATION.
-
-Note: This harness does NOT use RAG — it injects full KB context into the
-system prompt. Use it for testing the scoring engine and conversation flow,
-not for validating RAG retrieval accuracy.
-
-Run with: python text_bot.py
-Requires only GOOGLE_API_KEY in .env (no Deepgram/Cartesia/Daily needed).
+This uses the Google GenAI SDK directly and shares the same deterministic
+``AdvisorFlow`` as the LiveKit voice agent. It does not use STT, TTS, WebRTC,
+or per-turn RAG, so only ``GOOGLE_API_KEY`` is required.
 """
 
+from __future__ import annotations
+
+import json
 import os
 import sys
-import json
 import time
-from enum import Enum
 
 from dotenv import load_dotenv
-from loguru import logger
 from google import genai
 from google.genai import types
+from loguru import logger
 
-from knowledge_base import load_all, get_scheme_context, get_comparison_table
-from scoring import recommend_mutual_fund
-from prompts import (
-    PROFILING_PROMPT,
-    FUND_NAMES,
-    build_recommendation_prompt,
-    build_tie_breaker_prompt,
-)
+from advisor_core import AdvisorFlow, ConversationState as State
+from knowledge_base import load_all
+from prompts import PROFILING_PROMPT
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
+load_dotenv(".env.local", override=False)
+load_dotenv(".env", override=False)
 
-load_dotenv()
-
-MODEL = "gemini-2.5-flash"
+MODEL = os.getenv("LLM_MODEL", "gemini-2.5-flash-lite")
 MAX_RETRIES = 3
-RETRY_DELAY = 2  # seconds
+RETRY_DELAY = 2
 
-# Configure loguru — clean format for terminal
 logger.remove()
 logger.add(
     sys.stderr,
     format="<dim>{time:HH:mm:ss}</dim> | <level>{level:<7}</level> | {message}",
-    level="DEBUG",
+    level="INFO",
 )
-
-# ---------------------------------------------------------------------------
-# Function calling schema (matches HANDOFF.md §5)
-# ---------------------------------------------------------------------------
 
 EXTRACT_PROFILE_SCHEMA = types.FunctionDeclaration(
     name="extract_user_profile",
     description=(
-        "Call this tool once the user has provided enough information about "
-        "their investment timeframe, risk appetite, and starting amount."
+        "Call this tool once the user has provided their investment timeframe, "
+        "risk appetite, investment mode, and starting amount."
     ),
     parameters=types.Schema(
         type="OBJECT",
@@ -70,11 +51,7 @@ EXTRACT_PROFILE_SCHEMA = types.FunctionDeclaration(
             "risk_tolerance": types.Schema(
                 type="STRING",
                 enum=["low", "moderate", "high"],
-                description=(
-                    "Low = fears losing money / wants capital protection. "
-                    "Moderate = accepts some drops for growth. "
-                    "High = comfortable with significant volatility."
-                ),
+                description="The user's comfort with investment volatility.",
             ),
             "growth_style": types.Schema(
                 type="STRING",
@@ -84,79 +61,47 @@ EXTRACT_PROFILE_SCHEMA = types.FunctionDeclaration(
                     "diversified_global",
                     "unspecified",
                 ],
-                description=(
-                    "downside_protection = wants active debt/equity management to "
-                    "reduce losses. stable_bluechip = wants low-cost exposure to "
-                    "India's top 100 companies. diversified_global = wants exposure "
-                    "to Indian AND international stocks like Google/Alphabet."
-                ),
+                description="The user's preferred portfolio style.",
             ),
             "initial_investment": types.Schema(
                 type="INTEGER",
-                description="The initial amount in INR the user wants to invest.",
+                description="Starting investment in Indian Rupees.",
             ),
             "investment_mode": types.Schema(
                 type="STRING",
                 enum=["lumpsum", "sip", "both", "unspecified"],
-                description=(
-                    "Whether the user wants to invest a one-time lump sum, "
-                    "set up a monthly SIP, or both."
-                ),
+                description="One-time lumpsum, monthly SIP, both, or unknown.",
             ),
         },
-        required=["horizon_years", "risk_tolerance", "initial_investment"],
+        required=[
+            "horizon_years",
+            "risk_tolerance",
+            "initial_investment",
+            "investment_mode",
+        ],
     ),
 )
-
 TOOLS = types.Tool(function_declarations=[EXTRACT_PROFILE_SCHEMA])
 
 
-# ---------------------------------------------------------------------------
-# State machine
-# ---------------------------------------------------------------------------
-
-class State(Enum):
-    PROFILING = "profiling"
-    TIE_BREAKER = "tie_breaker"
-    RECOMMENDATION = "recommendation"
-
-
-# ---------------------------------------------------------------------------
-# Main bot class
-# ---------------------------------------------------------------------------
-
 class TextBot:
-    """Terminal-based mutual fund advisor using Gemini with function calling."""
+    """Terminal advisor using Gemini function calling and shared core logic."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         api_key = os.environ.get("GOOGLE_API_KEY")
-        if not api_key or api_key == "your_key_here":
-            logger.error("GOOGLE_API_KEY not set in .env — cannot start")
-            sys.exit(1)
+        if not api_key:
+            raise RuntimeError("GOOGLE_API_KEY is required for text mode")
 
         self.client = genai.Client(api_key=api_key)
-        self.state = State.PROFILING
+        self.flow = AdvisorFlow(use_rag=False)
+        self.state = self.flow.state.current
         self.history: list[types.Content] = []
 
-        # Load knowledge base
-        logger.info("Loading knowledge base...")
         load_all()
-        logger.info("Knowledge base loaded ✓")
-
-        # Create initial chat
         self._create_chat(PROFILING_PROMPT)
 
     def _create_chat(self, system_prompt: str) -> None:
-        """Create (or recreate) a chat session with a new system prompt.
-
-        On state transitions, we need to swap the system instruction.
-        The google-genai SDK binds system_instruction at chat creation time,
-        so we recreate the chat while preserving conversation history.
-        """
-        # In RECOMMENDATION state, remove tools so model doesn't try to
-        # call extract_user_profile again
         tools = [TOOLS] if self.state != State.RECOMMENDATION else []
-
         self.chat = self.client.chats.create(
             model=MODEL,
             config=types.GenerateContentConfig(
@@ -165,201 +110,99 @@ class TextBot:
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(
                     disable=True
                 ),
-                temperature=0.7,
+                temperature=0.3,
             ),
             history=self.history,
         )
-        logger.debug(f"Chat created with state={self.state.value}")
 
     def _send_with_retry(self, message: str) -> object:
-        """Send a message to the chat with retry logic for transient errors."""
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 return self.chat.send_message(message)
-            except Exception as e:
-                error_msg = str(e)
-                if attempt < MAX_RETRIES and (
-                    "RemoteProtocolError" in error_msg
-                    or "disconnected" in error_msg.lower()
-                    or "503" in error_msg
-                    or "429" in error_msg
-                ):
-                    wait = RETRY_DELAY * attempt
-                    logger.warning(
-                        f"Transient error (attempt {attempt}/{MAX_RETRIES}): "
-                        f"{error_msg[:80]}... retrying in {wait}s"
-                    )
-                    time.sleep(wait)
-                else:
+            except Exception as exc:
+                error = str(exc)
+                transient = any(
+                    marker in error.lower()
+                    for marker in ("remoteprotocolerror", "disconnected", "503", "429")
+                )
+                if attempt >= MAX_RETRIES or not transient:
                     raise
+                delay = RETRY_DELAY * attempt
+                logger.warning(
+                    "Transient Gemini error on attempt {}/{}; retrying in {}s",
+                    attempt,
+                    MAX_RETRIES,
+                    delay,
+                )
+                time.sleep(delay)
+        raise RuntimeError("Gemini retry loop ended unexpectedly")
 
-    def _handle_function_call(
-        self, fn_call: types.FunctionCall
-    ) -> types.Content:
-        """Process the extract_user_profile function call.
-
-        Runs the scoring engine, transitions state, and returns a
-        function response to feed back to the model.
-        """
+    def _handle_function_call(self, fn_call: types.FunctionCall) -> types.Content:
         args = dict(fn_call.args) if fn_call.args else {}
-        logger.info(f"🔧 Function call: {fn_call.name}({json.dumps(args, indent=2)})")
+        logger.info("Profile tool call: {}", json.dumps(args, ensure_ascii=False))
 
-        # Run scoring engine
-        result = recommend_mutual_fund(args)
-        logger.info(
-            f"📊 Scores: {result['scores']} | "
-            f"Winner: {result['winner']} | Tie: {result['is_tie']}"
-        )
+        transition = self.flow.handle_profile(args)
+        self.state = transition.state
 
-        if result["is_tie"] and self.state == State.PROFILING:
-            # --- Transition to TIE_BREAKER ---
-            self.state = State.TIE_BREAKER
-            new_prompt = build_tie_breaker_prompt(
-                result["winner"], result["runner_up"]
-            )
-            response_data = {
-                "status": "tie_breaker_needed",
-                "fund1": FUND_NAMES[result["winner"]],
-                "fund2": FUND_NAMES[result["runner_up"]],
-                "message": (
-                    f"The user's profile fits well with both "
-                    f"{FUND_NAMES[result['winner']]} and "
-                    f"{FUND_NAMES[result['runner_up']]}. "
-                    f"Ask ONE clarifying question to help decide."
-                ),
-            }
-            logger.info(
-                f"🔀 State → TIE_BREAKER "
-                f"({result['winner']} vs {result['runner_up']})"
-            )
-        else:
-            # --- Transition to RECOMMENDATION ---
-            winner_id = result["winner"]
-            self.state = State.RECOMMENDATION
-            scheme_context = get_scheme_context(winner_id)
-            comparison_table = get_comparison_table()
-            new_prompt = build_recommendation_prompt(
-                winner_id,
-                result["profile_summary"],
-                scheme_context,
-                comparison_table,
-            )
-            response_data = {
-                "status": "recommendation_ready",
-                "recommended_fund": FUND_NAMES[winner_id],
-                "profile_summary": result["profile_summary"],
-                "scores": result["scores"],
-            }
-            logger.info(f"✅ State → RECOMMENDATION ({winner_id})")
-
-        # Save current history before recreating chat
+        # Preserve the curated conversation while recreating the chat with the
+        # new state-specific system instruction.
         self.history = list(self.chat._curated_history)
-
-        # Add the assistant's function call to history
         self.history.append(
-            types.Content(
-                role="model",
-                parts=[types.Part(function_call=fn_call)],
-            )
+            types.Content(role="model", parts=[types.Part(function_call=fn_call)])
         )
-
-        # Add function response to history
         fn_response = types.Content(
             role="user",
             parts=[
                 types.Part(
                     function_response=types.FunctionResponse(
                         name=fn_call.name,
-                        response=response_data,
+                        response=transition.tool_result,
                     )
                 )
             ],
         )
         self.history.append(fn_response)
-
-        # Recreate chat with new system prompt + preserved history
-        self._create_chat(new_prompt)
-
+        self._create_chat(transition.prompt)
         return fn_response
 
     def get_greeting(self) -> str:
-        """Get the initial greeting from the bot (bot speaks first)."""
-        logger.info("🎙️ Bot generating greeting...")
         response = self._send_with_retry("Begin the conversation.")
-
-        # Check for function call (shouldn't happen on greeting, but be safe)
-        if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if part.function_call:
-                    self._handle_function_call(part.function_call)
-                    follow_up = self._send_with_retry("Continue the conversation.")
-                    return follow_up.text or ""
-
-        return response.text or ""
+        return self._resolve_response(response)
 
     def send_message(self, user_input: str) -> str:
-        """Send a user message and get the bot's response.
-
-        Handles function calls transparently — if the model wants to
-        call extract_user_profile, we run the scoring engine, swap
-        prompts, and return the model's recommendation.
-        """
         response = self._send_with_retry(user_input)
+        return self._resolve_response(response)
 
-        # Check if the model wants to call a function
-        if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
+    def _resolve_response(self, response: object) -> str:
+        candidates = getattr(response, "candidates", None)
+        if candidates and candidates[0].content.parts:
+            for part in candidates[0].content.parts:
                 if part.function_call:
-                    # Process the function call (runs scoring, transitions state)
                     self._handle_function_call(part.function_call)
-
-                    # Now get the model's natural language response
-                    # (recommendation announcement or tie-breaker question)
                     follow_up = self._send_with_retry(
-                        "Now respond to the user based on the function result."
+                        "Respond naturally based on the function result."
                     )
-                    return follow_up.text or ""
+                    return getattr(follow_up, "text", None) or ""
+        return getattr(response, "text", None) or ""
 
-        return response.text or ""
 
-
-# ---------------------------------------------------------------------------
-# Main loop
-# ---------------------------------------------------------------------------
-
-def main():
-    print("\n" + "=" * 60)
-    print("  PPFAS Mutual Fund Voice Agent (Text Mode)")
-    print("  Type your messages below. Ctrl+C to quit.")
-    print("=" * 60 + "\n")
-
+def main() -> None:
+    print("\nPPFAS Mutual Fund Advisor, text mode. Type 'quit' to exit.\n")
     bot = TextBot()
-
-    # Bot speaks first
-    greeting = bot.get_greeting()
-    print(f"\n🤖 Agent: {greeting}\n")
+    print(f"Agent: {bot.get_greeting()}\n")
 
     while True:
         try:
-            user_input = input("👤 You: ").strip()
+            user_input = input("You: ").strip()
             if not user_input:
                 continue
-
-            # Check for quit commands
-            if user_input.lower() in ("quit", "exit", "bye", "q"):
-                print("\n🤖 Agent: Thank you for speaking with PPFAS Mutual Fund. "
-                      "Have a great day!\n")
-                break
-
-            response = bot.send_message(user_input)
-            print(f"\n🤖 Agent: {response}\n")
-
+            if user_input.lower() in {"quit", "exit", "bye", "q"}:
+                print("Agent: Thank you for speaking with PPFAS Mutual Fund.")
+                return
+            print(f"Agent: {bot.send_message(user_input)}\n")
         except KeyboardInterrupt:
-            print("\n\n👋 Goodbye!")
-            break
-        except Exception as e:
-            logger.error(f"Error: {e}")
-            print(f"\n⚠️ Error: {e}. Please try again.\n")
+            print("\nGoodbye.")
+            return
 
 
 if __name__ == "__main__":

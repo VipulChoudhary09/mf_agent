@@ -1,210 +1,177 @@
-# PPFAS Mutual Fund Voice Agent
+# PPFAS Mutual Fund LiveKit Agent
 
-A production-grade voice AI agent that profiles investors through natural conversation and recommends the most suitable PPFAS mutual fund scheme, powered by RAG-based knowledge retrieval for accurate follow-up Q&A.
+A voice advisor that profiles an investor, selects a PPFAS fund through a deterministic scoring engine, and answers follow-up questions using fund-filtered RAG.
+
+The voice stack is now LiveKit-native:
+
+```text
+User
+  <-> LiveKit WebRTC room
+  -> Deepgram Nova-3 multilingual STT
+  -> deterministic profile scoring
+  -> per-turn ChromaDB RAG filtered by scheme_id
+  -> Gemini 2.5 Flash-Lite
+  -> Cartesia Sonic 3 TTS
+  <-> LiveKit WebRTC room
+```
 
 ## Architecture
 
-```
-                                ┌─────────────────────────────┐
-User ↔ Daily WebRTC ↔ Deepgram STT → RAGContextUpdater → Gemini 2.5 Flash → Cartesia TTS → Daily WebRTC
-                                │         ↓                        ↓ (function call)        │
-                                │   ChromaDB (per-turn)    Scoring Engine (Python)           │
-                                │   gemini-embedding-001   ├── deterministic scoring         │
-                                │   66 chunks, 3 schemes   └── tie-breaker detection         │
-                                │                                                            │
-                                │   SmartTurn v3 (local)   ← turn-end detection              │
-                                │   Silero VAD v5          ← voice activity detection         │
-                                └─────────────────────────────────────────────────────────────┘
+The LLM extracts structured profile fields and explains results. It does **not** choose the fund. `scoring.py` makes that decision from explicit rules, including horizon, risk tolerance, growth style, investment mode, and minimum-investment constraints.
+
+The conversation states are:
+
+```text
+PROFILING -> extract_user_profile -> RECOMMENDATION
+                    |
+                    +-> near tie -> TIE_BREAKER -> extract_user_profile -> RECOMMENDATION
 ```
 
-**Hybrid approach**: The LLM handles natural language understanding and explanation, while a deterministic Python scoring engine selects the fund — ensuring consistency, auditability, and compliance. RAG retrieves relevant KB chunks per question for accurate follow-up answers.
+In recommendation mode, LiveKit's `on_user_turn_completed` hook retrieves evidence for the latest question before the LLM generates. Preemptive generation is intentionally disabled so a response cannot begin with stale RAG context.
 
-## Supported Funds
+## Supported funds
 
-| Fund | Key Characteristic | Risk Level |
+| Fund | Primary characteristic | Risk level |
 |---|---|---|
-| **Parag Parikh Flexi Cap Fund** | Global diversification (India + international stocks like Google) | Very High |
-| **Parag Parikh Dynamic Asset Allocation Fund** | Active debt/equity rebalancing for downside protection | Moderately High |
-| **Parag Parikh Large Cap Fund** | Low-cost passive exposure to India's top 100 companies | Very High |
+| Parag Parikh Flexi Cap Fund | Indian and international equity diversification | Very High |
+| Parag Parikh Dynamic Asset Allocation Fund | Active equity/debt allocation for downside protection | Moderately High |
+| Parag Parikh Large Cap Fund | Low-cost exposure to India's top 100 companies | Very High |
 
-## Conversation State Machine
+## Setup
 
-```
-PROFILING → extract_user_profile() → RECOMMENDATION ← (follow-up Q&A with per-turn RAG)
-                  ↓ (if tie)
-            TIE_BREAKER → extract_user_profile() → RECOMMENDATION
-```
+Requirements:
 
-1. **PROFILING**: Bot asks about investment horizon, risk tolerance, SIP/lumpsum preference, amount, and growth style
-2. **TIE_BREAKER**: If two funds score within 1 point, bot asks one clarifying question
-3. **RECOMMENDATION**: Bot explains the selected fund; each follow-up question triggers dynamic RAG retrieval for accurate answers
-
-## Quick Start
-
-### Prerequisites
-
-- Python 3.12+
-- API keys for: [Google AI](https://aistudio.google.com/), [Deepgram](https://deepgram.com/), [Cartesia](https://cartesia.ai/), [Daily](https://daily.co/)
-
-### Setup
+- Python 3.10 or newer. Python 3.12 is recommended.
+- A LiveKit Cloud project or compatible self-hosted LiveKit deployment.
+- API keys for Google Gemini, Deepgram, and Cartesia.
 
 ```bash
-cd mf_agent
-
-python -m venv venv
-source venv/bin/activate
-
+git checkout feat/livekit-agents-port
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 
-# Configure API keys
-cp .env.example .env
-# Edit .env with your 4 API keys:
-#   GOOGLE_API_KEY, DEEPGRAM_API_KEY, CARTESIA_API_KEY, DAILY_API_KEY
+cp .env.example .env.local
+# Fill .env.local with your LiveKit and provider credentials.
 ```
 
-### Run
+Real credentials belong in `.env.local` or the deployment secret store. `.env`, `.env.local`, logs, metrics, and the local vector database are ignored by Git.
+
+## Run locally
+
+LiveKit's conventional entrypoint is `agent.py`.
 
 ```bash
-python server.py
+# Local terminal session. Useful for a quick microphone test.
+python agent.py console
+
+# Connect the worker to the configured LiveKit project.
+python agent.py dev
 ```
 
-On startup, the server will:
-1. Validate all 4 API keys
-2. Auto-index the KB into ChromaDB if needed (first run or empty store)
-3. Pre-load the knowledge base into memory
-4. Start the FastAPI server on port 7860
+`lk agent dev` also works because the LiveKit CLI discovers `agent.py` automatically.
 
-Then in another terminal:
+The worker registers under the dispatch name `mf-advisor`. Open the Agents Console for the LiveKit project, select that agent, and start a session. The repository does not include a custom browser frontend; the Agents Console is the test client for this branch.
+
+Legacy commands remain available:
 
 ```bash
-curl -s -X POST http://localhost:7860/start | jq .
+python bot.py dev
+python server.py dev
 ```
 
-Returns a Daily room URL — open it in your browser to start the conversation.
+`server.py` is now a compatibility shim. FastAPI, Daily room creation, and the old `/start` endpoint have been removed because LiveKit owns dispatch, rooms, media, and worker health.
 
-#### Alternative modes
+## Knowledge-base indexing
 
-| Command | Use case |
-|---|---|
-| `python text_bot.py` | Terminal text harness — same state machine, no voice/RAG, only needs GOOGLE_API_KEY |
-| `python scripts/index_kb.py` | Force re-index KB into ChromaDB (server does this automatically) |
+With `AUTO_INDEX_KB=true`, the worker checks the local Chroma database during process setup and creates it when missing. A cross-process file lock prevents multiple LiveKit prewarm processes from rebuilding the same index.
 
-### Measure Latency
+To force a rebuild after editing source documents:
+
+```bash
+python scripts/index_kb.py
+```
+
+Set `AUTO_INDEX_KB=false` to skip startup indexing. When no usable index exists, the advisor falls back to the full winning-fund knowledge base rather than failing the call.
+
+## Tests
+
+Network-free regression tests cover scoring, prompt transitions, tie resolution, RAG refresh, duplicate-query suppression, and full-KB fallback:
+
+```bash
+pytest tests/ -v
+```
+
+The direct Gemini text harness exercises the shared state machine without LiveKit, STT, or TTS:
+
+```bash
+python text_bot.py
+```
+
+A provider-level voice smoke test uses:
+
+```bash
+python agent.py console
+```
+
+That final command consumes provider API usage because it exercises Deepgram, Gemini, and Cartesia.
+
+## Latency and observability
+
+LiveKit Cloud supplies session traces and transcripts through its Agents observability tools. For a small local summary, the worker writes privacy-minimized metrics without transcript text to `livekit_metrics.jsonl`.
 
 ```bash
 python measure_latency.py
+python measure_latency.py --list
+python measure_latency.py --room <room-name>
 ```
 
-Parses `pipecat.log` and displays:
-- Per-turn latency breakdown (perceived, VAD, user→bot, LLM TTFB, TTS TTFB)
-- River-flow timeline visualization
-- Token counts, streaming rates, and cost breakdown (Gemini 2.5 Flash + Cartesia + Deepgram pricing)
-- Perceived Latency (VAD breakdown) — shows what % of wait is VAD vs pipeline
-- Conversation transcript with timestamps
-- Auto-saves transcripts to `transcripts.log`
+The report includes assistant turn count, mean, median, p95, and maximum end-to-end latency.
 
-```bash
-# Options
-python measure_latency.py -n 1     # previous conversation
-python measure_latency.py --list   # list all conversations in log
-python measure_latency.py --table  # tabular format
-python measure_latency.py --html   # export to HTML
+## Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LIVEKIT_URL` | none | LiveKit WebSocket endpoint |
+| `LIVEKIT_API_KEY` | none | LiveKit API key |
+| `LIVEKIT_API_SECRET` | none | LiveKit API secret |
+| `LIVEKIT_AGENT_NAME` | `mf-advisor` | Explicit dispatch name |
+| `DEEPGRAM_API_KEY` | none | Direct Deepgram plugin authentication |
+| `GOOGLE_API_KEY` | none | Gemini LLM and embedding authentication |
+| `CARTESIA_API_KEY` | none | Direct Cartesia plugin authentication |
+| `STT_MODEL` | `nova-3` | Deepgram speech model |
+| `STT_LANGUAGE` | `multi` | Multilingual and Hinglish-friendly recognition |
+| `LLM_MODEL` | `gemini-2.5-flash-lite` | Google text model |
+| `TTS_MODEL` | `sonic-3` | Cartesia speech model |
+| `TTS_VOICE` | repository default | Cartesia voice ID |
+| `USE_RAG` | `true` | Enable Chroma retrieval |
+| `AUTO_INDEX_KB` | `true` | Build missing local index during process setup |
+| `DELETE_ROOM_ON_CLOSE` | `true` | Delete the room after the advisor completes the `end_call` flow |
+| `LIVEKIT_METRICS_FILE` | `livekit_metrics.jsonl` | Local metrics destination |
+
+## Project structure
+
+```text
+agent.py                  LiveKit CLI entrypoint
+bot.py                    LiveKit AgentServer and voice session
+advisor_core.py           framework-neutral state machine and prompt transitions
+startup.py                provider validation, KB loading, safe auto-indexing
+server.py                 compatibility entrypoint
+text_bot.py               direct Gemini terminal harness
+scoring.py                deterministic recommendation engine
+prompts.py                state-specific voice prompts
+knowledge_base.py         source-document cache
+rag/
+  chunker.py              structure-aware Markdown splitting
+  embedder.py             ChromaDB and Gemini embeddings
+  retriever.py            scheme-filtered retrieval
+  rag_processor.py        transport-neutral retrieval helper
+  context_updater.py      per-turn prompt refresh and stale-context fallback
+scripts/index_kb.py       manual index rebuild
+tests/                    scoring, retrieval, chunking, and migration regressions
+docs/livekit_migration.md architecture decision record
 ```
 
-### Tests
+## Deployment
 
-```bash
-# All tests (57)
-pytest tests/ -v
-
-# By module
-pytest tests/test_scoring.py -v    # 16 scoring engine tests
-pytest tests/test_e2e.py -v        # 4 automated e2e scenarios
-pytest tests/test_chunker.py -v    # 25 markdown chunker tests
-pytest tests/test_retriever.py -v  # 16 retrieval + 10 golden question tests
-```
-
-## Project Structure
-
-```
-mf_agent/
-├── bot.py                  # Pipecat voice pipeline + state machine
-├── server.py               # ← single entry point (auto-indexes, loads KB, serves API)
-├── text_bot.py             # Terminal text harness (no voice/RAG, testing only)
-├── scoring.py              # Deterministic fund selection engine
-├── knowledge_base.py       # Loads & caches scheme markdown files
-├── prompts.py              # System prompts for each state (profiling/rec/tie-breaker)
-├── measure_latency.py      # Latency analyzer and cost calculator
-├── requirements.txt        # Python dependencies
-├── .env                    # API keys (not committed)
-│
-├── rag/                    # RAG pipeline
-│   ├── chunker.py          # Section-aware markdown splitter (H2/H3, table integrity)
-│   ├── embedder.py         # ChromaDB + gemini-embedding-001 (768d cosine)
-│   ├── retriever.py        # Filtered retrieval with 0.6 confidence threshold
-│   ├── rag_processor.py    # Stateless RAG helper for initial recommendation
-│   └── context_updater.py  # Per-turn FrameProcessor for follow-up Q&A
-│
-├── scripts/
-│   └── index_kb.py         # Batch embed KB → ChromaDB (rate-limit aware)
-│
-├── KB/                     # Knowledge base source documents
-│   └── pdftomds/           # 6 markdown files (flyer + presentation per fund)
-│       ├── FCfly.md / FCpres.md    # Flexi Cap
-│       ├── Dfly.md / Dpres.md      # Dynamic Asset Allocation
-│       └── LCfly.md / LCpres.md    # Large Cap
-│
-├── tests/                  # 57 tests total
-│   ├── test_scoring.py     # Scoring engine unit tests
-│   ├── test_e2e.py         # Automated e2e conversation scenarios
-│   ├── test_chunker.py     # Markdown chunker tests
-│   └── test_retriever.py   # RAG retrieval + golden question tests
-│
-└── docs/
-    └── rag_strategy.md     # RAG architecture planning doc
-```
-
-## RAG Pipeline
-
-The agent uses a two-stage RAG approach:
-
-1. **Initial Retrieval** (at recommendation time): A broad query fetches general fund context for the system prompt
-2. **Per-Turn Retrieval** (each follow-up question): `RAGContextUpdater` intercepts `LLMContextFrame` in the pipeline, extracts the user's question, and queries ChromaDB with that specific question + scheme_id filter
-
-This means each follow-up gets tailored context:
-- *"Who manages this fund?"* → retrieves fund manager chunk
-- *"What are the top holdings?"* → retrieves TOP 10 STOCKS chunk
-- *"3-year performance?"* → retrieves LUMPSUM & SIP PERFORMANCE chunk
-
-**Storage**: ChromaDB persistent local store (`chroma_db/`), 66 chunks across 3 schemes, embedded with `gemini-embedding-001` (768-dim cosine similarity).
-
-## Key Design Decisions
-
-- **Per-turn RAG** over full-context injection: Reduces system prompt from ~47K chars to ~2-4K chars per turn while maintaining accuracy across diverse follow-up questions
-- **Deterministic scoring engine**: The LLM never picks the fund — a Python function with auditable rules does, ensuring compliance and reproducibility
-- **System prompt swapping** via `LLMUpdateSettingsFrame` for state transitions (Gemini doesn't support mutable system messages in chat history)
-- **SmartTurn v3** for turn-end detection: Uses a local ML model instead of fixed silence timers, reducing false turn-ends mid-sentence
-- **Hard constraints**: Dynamic Asset Allocation requires ₹5,000 minimum for lumpsum (SIP exempt); exit load penalties for Flexi Cap under 2 years
-- **Near-tie detection**: When top-2 scores are within 1 point, triggers tie-breaker flow instead of a potentially wrong recommendation
-
-## Services & Pricing
-
-| Service | Purpose | Model | Cost |
-|---|---|---|---|
-| Google Gemini | LLM (conversation + function calling) | gemini-2.5-flash | $0.30/$2.50 per M input/output tokens |
-| Deepgram | Speech-to-Text (streaming) | nova-3-general | $0.0077/min |
-| Cartesia | Text-to-Speech | sonic-2 | ~$0.03/min (~1 credit/char) |
-| Daily | WebRTC transport | — | Free tier available |
-| Silero | Voice Activity Detection (local) | v5 | Free (local inference) |
-| ChromaDB | Vector store (local) | — | Free (local) |
-
-**Typical session cost**: ~$0.04–0.10 per 3-5 minute conversation.
-
-## Environment Variables
-
-```bash
-GOOGLE_API_KEY=       # Google AI Studio API key (Gemini + embeddings)
-DEEPGRAM_API_KEY=     # Deepgram STT API key
-CARTESIA_API_KEY=     # Cartesia TTS API key
-DAILY_API_KEY=        # Daily.co API key (WebRTC rooms)
-```
+The included Dockerfile starts `python agent.py start` as a non-root user and exposes the AgentServer health port. Supply all credentials through the deployment's secret manager. Do not add them to the image, Docker build arguments, or repository variables that are visible in logs.

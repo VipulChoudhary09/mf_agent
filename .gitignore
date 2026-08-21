@@ -1,5 +1,6 @@
 # Python
 venv/
+.venv/
 __pycache__/
 *.pyc
 *.pyo
@@ -7,9 +8,13 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
+.ruff_cache/
 
-# Environment
+# Environment and secrets
 .env
+.env.local
+.env.*.local
+secrets/
 
 # IDE
 .antigravitycli/
@@ -17,15 +22,19 @@ build/
 *.swp
 *.swo
 
-# Logs
+# Logs and local observability
 pipecat.log
 pipecat.log.*
+livekit.log
+livekit.log.*
+livekit_metrics.jsonl
+transcripts.log
+
+# Vector store (rebuilt from KB sources)
+chroma_db/
+chroma_db.index.lock
+*.index.lock
 
 # OS
 .DS_Store
 Thumbs.db
-secrets/
-
-# Vector store (rebuilt from KB sources)
-chroma_db/
-transcripts.log

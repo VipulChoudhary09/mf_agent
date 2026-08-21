@@ -1,122 +1,78 @@
 #!/usr/bin/env python3
-"""Index all KB markdown files into ChromaDB.
+"""Force a full rebuild of the local ChromaDB knowledge-base index.
 
-Normally you don't need to run this manually — server.py auto-indexes on
-startup if the vector store is missing or empty. Use this script only to
-force a full re-index (e.g. after updating KB documents).
-
-Usage:
-    python scripts/index_kb.py                     # default paths
-    python scripts/index_kb.py --kb-dir KB/pdftomds --db-path ./chroma_db
-
-This is idempotent: re-running deletes and recreates the collection.
+The LiveKit worker can auto-index during process setup when ``AUTO_INDEX_KB``
+is true. Run this command after KB changes or when preparing an index artifact.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(".env.local", override=False)
+load_dotenv(".env", override=False)
 
 from rag.chunker import chunk_all_kb_files
-from rag.embedder import reset_collection, get_collection
+from rag.embedder import reset_collection
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Index KB docs into ChromaDB")
-    parser.add_argument(
-        "--kb-dir",
-        default="KB/pdftomds",
-        help="Path to markdown KB directory (default: KB/pdftomds)",
-    )
-    parser.add_argument(
-        "--db-path",
-        default="./chroma_db",
-        help="ChromaDB persistent storage path (default: ./chroma_db)",
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--kb-dir", default="KB/pdftomds")
+    parser.add_argument("--db-path", default="./chroma_db")
     args = parser.parse_args()
 
     kb_dir = Path(args.kb_dir)
     if not kb_dir.exists():
-        print(f"❌ KB directory not found: {kb_dir}")
-        sys.exit(1)
+        raise SystemExit(f"KB directory not found: {kb_dir}")
 
-    # Step 1: Chunk all documents
-    print(f"📂 Chunking documents from {kb_dir}...")
     chunks = chunk_all_kb_files(kb_dir)
-    print(f"   → {len(chunks)} chunks created")
+    if not chunks:
+        raise SystemExit(f"No chunks generated from: {kb_dir}")
 
-    # Print per-file breakdown
-    file_counts: dict[str, int] = {}
-    for chunk in chunks:
-        fname = chunk["metadata"]["source_file"]
-        file_counts[fname] = file_counts.get(fname, 0) + 1
-
-    for fname, count in sorted(file_counts.items()):
-        print(f"   {fname:20s} → {count} chunks")
-
-    # Step 2: Reset and populate collection
-    print(f"\n🗄️  Indexing into ChromaDB at {args.db_path}...")
+    print(f"Indexing {len(chunks)} chunks into {args.db_path}")
     collection = reset_collection(args.db_path)
 
-    # ChromaDB batch add — small batches + retry for Gemini API rate limits
-    import time
+    batch_size = 5
+    max_retries = 3
+    for start in range(0, len(chunks), batch_size):
+        batch = chunks[start : start + batch_size]
+        last_error: Exception | None = None
 
-    BATCH_SIZE = 5
-    MAX_RETRIES = 3
-    for i in range(0, len(chunks), BATCH_SIZE):
-        batch = chunks[i : i + BATCH_SIZE]
-        batch_ids = [c["id"] for c in batch]
-        batch_docs = [c["text"] for c in batch]
-        batch_metas = [c["metadata"] for c in batch]
-
-        for attempt in range(MAX_RETRIES):
+        for attempt in range(max_retries):
             try:
                 collection.add(
-                    ids=batch_ids,
-                    documents=batch_docs,
-                    metadatas=batch_metas,  # type: ignore[arg-type]
+                    ids=[chunk["id"] for chunk in batch],
+                    documents=[chunk["text"] for chunk in batch],
+                    metadatas=[chunk["metadata"] for chunk in batch],
                 )
+                last_error = None
                 break
-            except (ValueError, Exception) as e:
-                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    wait = 5 * (2 ** attempt)  # 5s, 10s, 20s
-                    print(f"   ⏳ Rate limited, waiting {wait}s (attempt {attempt + 1}/{MAX_RETRIES})...")
-                    time.sleep(wait)
-                else:
+            except Exception as exc:
+                last_error = exc
+                message = str(exc)
+                if "429" not in message and "RESOURCE_EXHAUSTED" not in message:
                     raise
+                delay = 5 * (2**attempt)
+                print(f"Rate limited; retrying in {delay}s")
+                time.sleep(delay)
 
-        embedded = min(i + BATCH_SIZE, len(chunks))
-        print(f"   Embedded {embedded}/{len(chunks)} chunks...")
-        if embedded < len(chunks):
-            time.sleep(3)  # rate limit cooldown between batches
+        if last_error is not None:
+            raise RuntimeError("Indexing failed after retries") from last_error
 
-    print(f"   ✅ {collection.count()} chunks embedded and stored")
+        completed = min(start + batch_size, len(chunks))
+        print(f"Embedded {completed}/{len(chunks)}")
+        if completed < len(chunks):
+            time.sleep(3)
 
-    # Step 3: Quick sanity check
-    print("\n🔍 Sanity check — querying 'exit load' for each scheme...")
-    for scheme_id in ["Dynamic_Asset_Allocation", "Large_Cap", "Flexi_Cap"]:
-        results = collection.query(
-            query_texts=["What is the exit load?"],
-            n_results=1,
-            where={"scheme_id": scheme_id},
-        )
-        if results and results["documents"] and results["documents"][0]:
-            doc = results["documents"][0][0]
-            dist = results["distances"][0][0]  # type: ignore[index]
-            preview = doc[:120].replace("\n", " ")
-            print(f"   {scheme_id:30s} (dist={dist:.3f}): {preview}...")
-        else:
-            print(f"   {scheme_id:30s}: ❌ no results")
-
-    print("\n✅ Indexing complete!")
+    print(f"Index ready with {collection.count()} chunks")
 
 
 if __name__ == "__main__":
